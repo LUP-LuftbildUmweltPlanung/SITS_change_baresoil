@@ -44,7 +44,7 @@ def check_and_reproject_shapefile(shapefile_path, target_epsg=3035):
         print("Shapefile is already in EPSG: 3035")
         return shapefile_path
 
-def force_harmonic(project_name,aoi,TSS_Sensors,TSS_DATE_RANGE,process_folder,force_dir,TSS_SPECTRAL_ADJUST,TSS_ABOVE_NOISE,TSS_BELOW_NOISE,hold,TSS_NTHREAD_READ,TSS_NTHREAD_COMPUTE,
+def force_baresoil(project_name,aoi,TSS_Sensors,TSS_DATE_RANGE,process_folder,force_dir,TSS_SPECTRAL_ADJUST,TSS_ABOVE_NOISE,TSS_BELOW_NOISE,hold,TSS_NTHREAD_READ,TSS_NTHREAD_COMPUTE,
                    TSS_NTHREAD_WRITE,TSS_BLOCK_SIZE,**kwargs):
 
     force_dir = f"{force_dir}:{force_dir}"

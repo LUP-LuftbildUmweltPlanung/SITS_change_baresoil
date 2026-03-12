@@ -17,12 +17,12 @@ force_params = {
     #########################
     #########Basics##########
     #########################
-    "project_name": "bare_soil_closemine_3y_v2", #Project Name that will be the name of output folder in temp & result subfolder test_full_tile_all_time
+    "project_name": "bare_soil_closemine_5y_v3", #Project Name that will be the name of output folder in temp & result subfolder test_full_tile_all_time
     "aoi": "/rvt_mount/3DTests/data/bare_soil/hambach.shp", #Define Area of Interest as Shapefile
 
     #TimeSeriesStack (TSS) --> Real Spectral Values
-    "TSS_Sensors": "SEN2A SEN2B", #LND04 LND05 LND07 LND08 LND09 SEN2A SEN2B, # Choose between Input Sensors
-    "TSS_DATE_RANGE": "2018-01-01 2020-12-31",# TimeRange for ChangeDetection.
+    "TSS_Sensors": "SEN2A SEN2B", # Choose between Input Sensors
+    "TSS_DATE_RANGE": "2018-01-01 2022-12-31",# TimeRange for index calculation.
 }
 
 force_advanced_params = {
@@ -75,22 +75,22 @@ if __name__ == '__main__':
     # profiler = cProfile.Profile()
     # profiler.enable()
 
-    # Measure time for force_harmonic
+    # Measure time for force_baresoil
     startzeit_force = time.time()
-    force_harmonic(**force_params, **force_advanced_params)
+    #force_baresoil(**force_params, **force_advanced_params)
     endzeit_force = time.time()
-    force_harmonic_time = endzeit_force - startzeit_force
-    print(f"tss executed in: {format_time(force_harmonic_time)}")
+    force_baresoil_time = endzeit_force - startzeit_force
+    print(f"tss executed in: {format_time(force_baresoil_time)}")
 
-    # Measure time for harmonic
-    startzeit_harmonic = time.time()
-    harmonic(**analysis_params, **analysis_advanced_params)
-    endzeit_harmonic = time.time()
-    harmonic_time = endzeit_harmonic - startzeit_harmonic
-    print(f"Analysis executed in: {format_time(harmonic_time)}")
+    # Measure time forbaresoil
+    startzeit_baresoil = time.time()
+    baresoil(**analysis_params, **analysis_advanced_params)
+    endzeit_baresoil = time.time()
+    baresoil_time = endzeit_baresoil - startzeit_baresoil
+    print(f"Analysis executed in: {format_time(baresoil_time)}")
 
     # Total time
-    total_time = force_harmonic_time + harmonic_time
+    total_time = force_baresoil_time + baresoil_time
     print(f"Total execution time: {format_time(total_time)}")
     print("Force params:", force_params)
     print("Analysis params:", analysis_params)

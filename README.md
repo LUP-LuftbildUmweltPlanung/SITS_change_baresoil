@@ -1,6 +1,6 @@
 # SITS_change_baresoil
 
-Baresoil Algorithm for ChangeDetection based on FORCE Datacube
+Baresoil algorithm for change detection based on FORCE Datacube.
 
 ## 1. Installing
 ```
@@ -13,7 +13,7 @@ sudo apt-get install xterm
 
 _**Notes:**_
 
-code is build upon FORCE-Datacube and -Framework (Docker, FORCE-Version 3.7.11)
+Code is build upon FORCE-Datacube and -Framework (Docker, FORCE-Version 3.7.12)
 
 [How to Install FORCE with Docker](https://force-eo.readthedocs.io/en/latest/setup/docker.html#docker)
 
@@ -30,7 +30,7 @@ It's based on the following folder structure:
 </div>
 The bare soil algorithm is based in the spectral index PV + IR2 (bare soil index). The spectral index is calculated for the entire time series with Sentinel-2. 
 The formula is as follows: 
-PV + IR2 = ((NIR - RED) / (NIR + RED) + (NIR - SWIR2) / (NIR + SWIR2)). For more information [data description](https://geoservice.dlr.de/web/datasets/soilsuite_eur_5y)
+PV + IR2 = ((NIR - RED) / (NIR + RED) + (NIR - SWIR2) / (NIR + SWIR2)).
 
 Some filters are applied to the spectral index time series to reduce noise and outliers. The following filters are applied:
 * Minimal soil count: A pixel falls into the valid mask, if it is detected three times as bare soil. This mitigates the effect of spurious outliers.

@@ -169,7 +169,7 @@ def _write_bare_soil_summary(reference_raster, output_path, ratio, bare_counts, 
         dst.set_band_description(3, 'valid_observation_count')
 
 
-def harmonic(project_name,bare_soil_lower,bare_soil_upper,min_consecutive,mosaic,process_folder,tss_lst,overwrite_results=False,debug_stats=False,**kwargs):
+def baresoil(project_name,bare_soil_lower,bare_soil_upper,min_consecutive,mosaic,process_folder,tss_lst,overwrite_results=False,debug_stats=False,**kwargs):
 
     temp_folder = process_folder + "/temp"
     proc_folder = process_folder + "/results"
@@ -240,6 +240,8 @@ def harmonic(project_name,bare_soil_lower,bare_soil_upper,min_consecutive,mosaic
             where=total_valid > 0
         ) * 100
         ratio[total_valid == 0] = np.nan
+        valid_ratio = ~np.isnan(ratio)
+        ratio[valid_ratio] = np.floor(ratio[valid_ratio] + 0.5)
 
         _write_bare_soil_summary(raster_tss, output_file, ratio, bare_occurrences, total_valid)
         if debug_stats:
