@@ -2,7 +2,121 @@ import os
 import subprocess
 import time
 import shutil
+import glob
+import numpy as np
+import rasterio
+from rasterio.mask import mask as rio_mask
 import geopandas as gpd
+
+
+def _clip_raster_to_aoi(raster_path, aoi_gdf):
+    if aoi_gdf is None or aoi_gdf.empty:
+        return
+    with rasterio.open(raster_path) as src:
+        clip_gdf = aoi_gdf
+        if clip_gdf.crs and src.crs and clip_gdf.crs != src.crs:
+            clip_gdf = clip_gdf.to_crs(src.crs)
+        try:
+            out_image, out_transform = rio_mask(
+                src,
+                clip_gdf.geometry,
+                crop=True,
+                filled=True,
+                nodata=src.nodata
+            )
+        except ValueError:
+            return
+        out_meta = src.meta.copy()
+        out_meta.update({
+            "height": out_image.shape[1],
+            "width": out_image.shape[2],
+            "transform": out_transform
+        })
+        tmp_path = raster_path + ".clip"
+        with rasterio.open(tmp_path, 'w', **out_meta) as dst:
+            dst.write(out_image)
+            for idx, desc in enumerate(src.descriptions, start=1):
+                if desc:
+                    dst.set_band_description(idx + 1, desc)
+        os.replace(tmp_path, raster_path)
+
+
+def _split_mask_stacks(process_folder, project_name, aoi_path):
+    aoi_gdf = None
+    if aoi_path and os.path.exists(aoi_path):
+        try:
+            aoi_gdf = gpd.read_file(aoi_path)
+        except Exception as exc:
+            print(f"Warning: unable to read AOI for clipping ({aoi_path}): {exc}")
+            aoi_gdf = None
+
+    tiles_root = os.path.join(process_folder, "temp", project_name, "tiles_tss")
+    search_pattern = os.path.join(tiles_root, "X*", "*.tif")
+    for raster_path in glob.glob(search_pattern):
+        if raster_path.endswith("_mask.tif"):
+            continue
+        mask_path = raster_path.replace('.tif', '_mask.tif')
+        if os.path.exists(mask_path):
+            continue
+        try:
+            with rasterio.open(raster_path) as src:
+                total_bands = src.count
+                if total_bands <= 1:
+                    print(f"Skipping mask split for {raster_path}; unexpected band count {total_bands}.")
+                    continue
+
+                descriptions = src.descriptions
+                mask_start_idx = None
+                for idx, desc in enumerate(descriptions, start=1):
+                    if desc and desc.endswith("_MASK"):
+                        mask_start_idx = idx
+                        break
+
+                if mask_start_idx is None:
+                    print(f"Skipping mask split for {raster_path}; mask bands not detected.")
+                    continue
+
+                value_count = mask_start_idx - 1
+                mask_count = total_bands - value_count
+                if value_count <= 0 or mask_count <= 0:
+                    print(f"Skipping mask split for {raster_path}; invalid band partition ({value_count}/{mask_count}).")
+                    continue
+
+                value_meta = src.meta.copy()
+                value_meta.update(count=value_count)
+                mask_meta = src.meta.copy()
+                mask_meta.update(count=mask_count, dtype='uint8', nodata=0)
+                value_desc = descriptions[:value_count]
+                mask_desc = descriptions[value_count:value_count + mask_count]
+
+                tmp_values = raster_path + ".tmp"
+                with rasterio.open(tmp_values, 'w', **value_meta) as dst_val:
+                    for idx in range(value_count):
+                        band_data = src.read(idx + 1)
+                        dst_val.write(band_data, idx + 1)
+                        desc = value_desc[idx] if idx < len(value_desc) else ''
+                        if desc:
+                            dst_val.set_band_description(idx + 1, desc)
+
+                with rasterio.open(mask_path, 'w', **mask_meta) as dst_mask:
+                    for idx in range(mask_count):
+                        mask_band = src.read(value_count + idx + 1).astype(np.uint8)
+                        dst_mask.write(mask_band, idx + 1)
+                        if idx < len(mask_desc) and mask_desc[idx]:
+                            desc = mask_desc[idx]
+                        elif idx < len(value_desc) and value_desc[idx]:
+                            desc = f"{value_desc[idx]}_MASK"
+                        else:
+                            desc = ''
+                        if desc:
+                            dst_mask.set_band_description(idx + 1, desc)
+
+                os.replace(tmp_values, raster_path)
+                _clip_raster_to_aoi(raster_path, aoi_gdf)
+                if os.path.exists(mask_path):
+                    _clip_raster_to_aoi(mask_path, aoi_gdf)
+        except Exception as exc:
+            print(f"Masked processed {raster_path}")
 
 def replace_parameters(filename, replacements):
     with open(filename, 'r') as f:
@@ -100,8 +214,6 @@ def force_baresoil(project_name,aoi,TSS_Sensors,TSS_DATE_RANGE,process_folder,fo
 
     subprocess.run(['sudo', 'chmod', '-R', '777', f"{mask_folder}/{project_name}"])
 
-
-
     #analysis_tss
     ###force param
     os.makedirs(f"{temp_folder}/{project_name}", exist_ok=True)
@@ -159,5 +271,6 @@ def force_baresoil(project_name,aoi,TSS_Sensors,TSS_DATE_RANGE,process_folder,fo
         subprocess.run(['xterm', '-e', cmd])
 
     subprocess.run(['sudo', 'chmod', '-R', '777', f"{temp_folder}/{project_name}"])
+    _split_mask_stacks(process_folder, project_name, aoi)
     endzeit = time.time()
     print("FORCE-Processing beendet nach "+str((endzeit-startzeit)/60)+" Minuten")

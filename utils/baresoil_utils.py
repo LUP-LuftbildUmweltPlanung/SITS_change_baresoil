@@ -20,6 +20,7 @@ from utils.residuals_utils import write_output_raster
 from utils.residuals_utils import slice_by_date
 from utils.residuals_utils import calculate_residuals
 
+BAND_CHUNK_SIZE = 8
 
 def format_time(seconds):
     """Format the time in hours, minutes, and seconds."""
@@ -64,67 +65,87 @@ def process_point_timeseries(raster_tsi_path, raster_tss_path, points_path, save
                         with_std, save_fig, ylab, title, id_column)
 
 
-def _mask_min_consecutive(candidate_mask, min_consecutive, breaker_mask=None):
-    """Return mask where runs of True meet the min_consecutive requirement."""
-    if min_consecutive <= 1:
-        return candidate_mask.copy()
+def _parse_band_date(description):
+    if not description:
+        return None
+    token = description[:8]
+    try:
+        return dt.datetime.strptime(token, "%Y%m%d").strftime("%Y-%m-%d")
+    except ValueError:
+        return None
 
-    if breaker_mask is None:
-        breaker_mask = ~candidate_mask
 
-    rows, cols, timesteps = candidate_mask.shape
-    if timesteps < min_consecutive:
-        return np.zeros_like(candidate_mask, dtype=bool)
+def _compute_bare_soil_counts(raster_path, mask_path, lower, upper, min_consecutive):
+    min_consecutive = max(1, int(min_consecutive))
+    with rasterio.open(raster_path) as src:
+        nodata = src.nodata if src.nodata is not None else -9999
+        height, width = src.height, src.width
+        total_valid = np.zeros((height, width), dtype=np.uint16)
+        bare_occurrences = np.zeros((height, width), dtype=np.uint16)
+        run_counts = np.zeros((height, width), dtype=np.uint16)
+        date_strings = []
+        for desc in src.descriptions:
+            parsed = _parse_band_date(desc)
+            if parsed:
+                date_strings.append(parsed)
 
-    pixels = rows * cols
-    candidate_flat = candidate_mask.reshape(pixels, timesteps)
-    breaker_flat = breaker_mask.reshape(pixels, timesteps)
-    qualified_flat = np.zeros_like(candidate_flat, dtype=bool)
+        mask_src = None
+        if mask_path and os.path.exists(mask_path):
+            try:
+                mask_src = rasterio.open(mask_path)
+                if mask_src.count != src.count:
+                    print(f"Warning: mask band count mismatch for {mask_path}. Expected {src.count}, got {mask_src.count}. Ignoring mask.")
+                    mask_src.close()
+                    mask_src = None
+            except Exception as exc:
+                print(f"Warning: unable to open mask raster {mask_path}: {exc}")
+                mask_src = None
 
-    run_counts = np.zeros(pixels, dtype=np.int32)
-    max_pending = min_consecutive - 1
-    pending_buf = None
-    if max_pending:
-        pending_buf = np.full((max_pending, pixels), -1, dtype=np.int32)
+        band_chunk = max(1, min(BAND_CHUNK_SIZE, src.count))
+        indexes = list(range(1, src.count + 1))
+        try:
+            for chunk_start in range(0, src.count, band_chunk):
+                chunk_indexes = indexes[chunk_start:chunk_start + band_chunk]
+                data_chunk = src.read(chunk_indexes)
+                if mask_src:
+                    mask_chunk = mask_src.read(chunk_indexes)
+                else:
+                    mask_chunk = None
 
-    for t in range(timesteps):
-        breakers = breaker_flat[:, t]
-        if np.any(breakers):
-            run_counts[breakers] = 0
-            if pending_buf is not None:
-                pending_buf[:, breakers] = -1
+                for offset, band_idx in enumerate(chunk_indexes):
+                    band = data_chunk[offset]
+                    valid = band != nodata
+                    threshold_hit = (band <= lower) | (band >= upper)
+                    candidate = valid & threshold_hit
 
-        candidates = candidate_flat[:, t]
-        if not np.any(candidates):
-            continue
+                    if mask_chunk is not None:
+                        pass_mask = mask_chunk[offset] != 0
+                        candidate &= pass_mask
+                    else:
+                        pass_mask = None
 
-        run_counts[candidates] += 1
+                    if np.any(candidate):
+                        run_counts[candidate] += 1
+                        just_reached = candidate & (run_counts == min_consecutive)
+                        if np.any(just_reached):
+                            increment = 1 if min_consecutive == 1 else min_consecutive
+                            bare_occurrences[just_reached] += increment
+                        continuing = candidate & (run_counts > min_consecutive)
+                        if np.any(continuing):
+                            bare_occurrences[continuing] += 1
 
-        if pending_buf is not None:
-            still_pending = candidates & (run_counts < min_consecutive)
-            if np.any(still_pending):
-                slots = run_counts[still_pending] - 1
-                idxs = np.where(still_pending)[0]
-                pending_buf[slots, idxs] = t
+                    breaker = valid & (~threshold_hit)
+                    if pass_mask is not None:
+                        breaker |= valid & (~pass_mask)
+                    if np.any(breaker):
+                        run_counts[breaker] = 0
 
-        just_reached = candidates & (run_counts == min_consecutive)
-        if np.any(just_reached):
-            idxs = np.where(just_reached)[0]
-            qualified_flat[idxs, t] = True
-            if pending_buf is not None:
-                for slot in range(max_pending):
-                    stored = pending_buf[slot, idxs]
-                    valid = stored >= 0
-                    if np.any(valid):
-                        qualified_flat[idxs[valid], stored[valid]] = True
-                pending_buf[:, idxs] = -1
+                    total_valid += valid
+        finally:
+            if mask_src:
+                mask_src.close()
 
-        continuing = candidates & (run_counts > min_consecutive)
-        if np.any(continuing):
-            idxs = np.where(continuing)[0]
-            qualified_flat[idxs, t] = True
-
-    return qualified_flat.reshape(rows, cols, timesteps)
+    return date_strings, total_valid, bare_occurrences
 
 
 def _parse_date_bounds(date_strings):
@@ -160,22 +181,31 @@ def _write_bare_soil_summary(reference_raster, output_path, ratio, bare_counts, 
         meta = src.meta.copy()
         meta.update(dtype='float32', count=3, nodata=np.nan, compress='lzw')
 
+    band_names = (
+        'bare_soil_ratio',
+        'bare_soil_occurrences',
+        'valid_observation_count',
+    )
+
     with rasterio.open(output_path, 'w', **meta) as dst:
         dst.write(ratio.astype('float32'), 1)
         dst.write(bare_counts.astype('float32'), 2)
         dst.write(valid_counts.astype('float32'), 3)
-        dst.set_band_description(1, 'bare_soil_ratio')
-        dst.set_band_description(2, 'bare_soil_occurrences')
-        dst.set_band_description(3, 'valid_observation_count')
+        for idx, name in enumerate(band_names, start=1):
+            dst.set_band_description(idx, name)
+        dst.descriptions = band_names
 
 
-def baresoil(project_name,bare_soil_lower,bare_soil_upper,min_consecutive,mosaic,process_folder,tss_lst,overwrite_results=False,debug_stats=False,**kwargs):
+def baresoil(project_name,bare_soil_lower,bare_soil_upper,min_consecutive,mosaic,process_folder,tss_lst,overwrite_results=False,debug_stats=False,cleanup_tss=False,**kwargs):
 
     temp_folder = process_folder + "/temp"
     proc_folder = process_folder + "/results"
 
     if not tss_lst:
-        tss_lst = sorted(glob.glob(f"{temp_folder}/{project_name}/tiles_tss/X*/*.tif"))
+        discovered = sorted(glob.glob(f"{temp_folder}/{project_name}/tiles_tss/X*/*.tif"))
+        tss_lst = [fp for fp in discovered if not fp.endswith("_mask.tif")]
+
+    tss_lst = [fp for fp in tss_lst if not fp.endswith("_mask.tif")]
 
     if not tss_lst:
         print("No TSS rasters found; skipping bare soil analysis.")
@@ -207,8 +237,14 @@ def baresoil(project_name,bare_soil_lower,bare_soil_upper,min_consecutive,mosaic
                 continue
         os.makedirs(output, exist_ok=True)
 
-        raster_tss_data, date_strings, _, _, _ = extract_data(raster_tss, with_std = False)
-
+        mask_path = raster_tss.replace('.tif', '_mask.tif')
+        date_strings, total_valid_counts, bare_occurrences_counts = _compute_bare_soil_counts(
+            raster_tss,
+            mask_path if os.path.exists(mask_path) else None,
+            bare_soil_lower,
+            bare_soil_upper,
+            min_consecutive,
+        )
         tile_start, tile_end = _parse_date_bounds(date_strings)
         if tile_start and tile_end:
             global_start = tile_start if global_start is None else min(global_start, tile_start)
@@ -216,15 +252,9 @@ def baresoil(project_name,bare_soil_lower,bare_soil_upper,min_consecutive,mosaic
         output_filename = _format_range_filename(tile_start, tile_end)
         output_file = os.path.join(output, output_filename)
 
-        valid_mask = ~np.isnan(raster_tss_data)
-        total_valid = valid_mask.sum(axis=2).astype(np.float32)
+        total_valid = total_valid_counts.astype(np.float32, copy=False)
+        bare_occurrences = bare_occurrences_counts.astype(np.float32, copy=False)
 
-        candidate_hits = (raster_tss_data <= bare_soil_lower) | (raster_tss_data >= bare_soil_upper)
-        candidate_mask = valid_mask & candidate_hits
-        breaker_mask = valid_mask & ~candidate_hits
-        qualified_mask = _mask_min_consecutive(candidate_mask, min_consecutive, breaker_mask=breaker_mask)
-
-        bare_occurrences = qualified_mask.sum(axis=2).astype(np.float32)
         if debug_stats and bare_occurrences.size:
             nonzero_occ = bare_occurrences[bare_occurrences > 0]
             if nonzero_occ.size:
@@ -255,15 +285,27 @@ def baresoil(project_name,bare_soil_lower,bare_soil_upper,min_consecutive,mosaic
                     #print("    Bare occurrences after write: no non-zero values.")
         outputs.append(output_file)
 
-        raster_tss_data = None
-
     if mosaic and outputs:
         os.makedirs(proc_folder, exist_ok=True)
         project_folder = os.path.join(proc_folder, project_name)
         os.makedirs(project_folder, exist_ok=True)
         mosaic_filename = _format_range_filename(global_start, global_end)
         mosaic_output = os.path.join(project_folder, mosaic_filename)
-        mosaic_rasters(outputs, mosaic_output)
+        mosaic_rasters(
+            outputs,
+            mosaic_output,
+            ['bare_soil_ratio', 'bare_soil_occurrences', 'valid_observation_count']
+        )
+
+    if cleanup_tss:
+        tiles_root = os.path.join(process_folder, "temp", project_name, "tiles_tss")
+        mask_root = os.path.join(process_folder, "temp", "_mask", project_name)
+        for label, path in (("TSS tiles", tiles_root), ("mask tiles", mask_root)):
+            if os.path.exists(path):
+                shutil.rmtree(path, ignore_errors=True)
+                print(f"Removed {label}: {path}")
+            else:
+                print(f"{label} already removed or missing: {path}")
 
 def mosaic_rasters(input_pattern, output_filename, band_descriptions=None):
     """
@@ -296,9 +338,12 @@ def mosaic_rasters(input_pattern, output_filename, band_descriptions=None):
     with rasterio.open(output_filename, "w", **out_meta) as dest:
         dest.write(mosaic)
         if band_descriptions:
+            clean_names = []
             for i, desc in enumerate(band_descriptions, start=1):
-                if desc:
-                    dest.set_band_description(i, desc)
+                label = desc or f"band_{i}"
+                dest.set_band_description(i, label)
+                clean_names.append(label)
+            dest.descriptions = tuple(clean_names)
 
     # Close the input files
     for src in src_files_to_mosaic:

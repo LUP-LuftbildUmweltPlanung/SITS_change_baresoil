@@ -26,7 +26,7 @@ Code is build upon FORCE-Datacube and -Framework (Docker, FORCE-Version 3.7.12)
 This repository contains the code necessary to run change detection for Satellite Image Time Series with [bare soil Algorithm](https://geoservice.dlr.de/web/datasets/soilsuite_eur_5y) based on the [FORCE Datacube](https://force-eo.readthedocs.io/en/latest/index.html). 
 It's based on the following folder structure:
 <div align="center">
-<img src="img/baresoil_spectral_index.png" width="400" height="320">
+<img src="img/baresoil_spectral_index.png" width="500" height="420">
 </div>
 The bare soil algorithm is based in the spectral index PV + IR2 (bare soil index). The spectral index is calculated for the entire time series with Sentinel-2. 
 The formula is as follows: 

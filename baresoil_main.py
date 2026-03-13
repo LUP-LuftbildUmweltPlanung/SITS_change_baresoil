@@ -17,12 +17,12 @@ force_params = {
     #########################
     #########Basics##########
     #########################
-    "project_name": "bare_soil_closemine_5y_v3", #Project Name that will be the name of output folder in temp & result subfolder test_full_tile_all_time
-    "aoi": "/rvt_mount/3DTests/data/bare_soil/hambach.shp", #Define Area of Interest as Shapefile
+    "project_name": "bare_soil_3tiles_1y_v1", #Project Name that will be the name of output folder in temp & result subfolder test_full_tile_all_time
+    "aoi": "/rvt_mount/3DTests/data/bare_soil/3tiles.shp", #Define Area of Interest as Shapefile
 
     #TimeSeriesStack (TSS) --> Real Spectral Values
     "TSS_Sensors": "SEN2A SEN2B", # Choose between Input Sensors
-    "TSS_DATE_RANGE": "2018-01-01 2022-12-31",# TimeRange for index calculation.
+    "TSS_DATE_RANGE": "2018-01-01 2018-12-31",# TimeRange for index calculation.
 }
 
 force_advanced_params = {
@@ -53,8 +53,9 @@ analysis_params = {
     "bare_soil_upper": 1371,  # values >= this threshold count as bare soil
     "min_consecutive": 3,     # require at least this many consecutive valid detections
     "mosaic": True,           # Mosaic the per-tile results
-    "overwrite_results": True,
-    "debug_stats": True,
+    "overwrite_results": True, # Whether to overwrite existing results (if False, will skip processing if results already exist)
+    "debug_stats": True,       # Print additional statistics for debugging purposes
+    "cleanup_tss": False,      # Remove intermediate TSS & mask tiles after aggregation
 }
 
 analysis_advanced_params = {
@@ -77,7 +78,7 @@ if __name__ == '__main__':
 
     # Measure time for force_baresoil
     startzeit_force = time.time()
-    #force_baresoil(**force_params, **force_advanced_params)
+    force_baresoil(**force_params, **force_advanced_params)
     endzeit_force = time.time()
     force_baresoil_time = endzeit_force - startzeit_force
     print(f"tss executed in: {format_time(force_baresoil_time)}")

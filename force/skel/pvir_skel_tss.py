@@ -1,6 +1,7 @@
 import numpy as np
 import time
 from datetime import datetime, timedelta, date
+
 # some global config variables
 start = date.fromisoformat('1970-01-01')
 
@@ -11,7 +12,9 @@ def forcepy_init(dates, sensors, bandnames):
     bandnames: numpy.ndarray[nBands](str)
     """
 
-    return [f'{(start+timedelta(days=int(dat))).year}{(start+timedelta(days=int(dat))).month:02d}{(start+timedelta(days=int(dat))).day:02d}_{sens.decode("utf-8")}' for dat, sens in zip(dates, sensors)]
+    base = [f'{(start+timedelta(days=int(dat))).year}{(start+timedelta(days=int(dat))).month:02d}{(start+timedelta(days=int(dat))).day:02d}_{sens.decode("utf-8")}' for dat, sens in zip(dates, sensors)]
+    mask = [f"{label}_MASK" for label in base]
+    return base + mask
 
 
 def forcepy_pixel(inarray, outarray, dates, sensors, bandnames, nodata, nproc):
@@ -76,5 +79,13 @@ def forcepy_pixel(inarray, outarray, dates, sensors, bandnames, nodata, nproc):
 
     valid_condition = swir_nir_ratio >= 0.02
 
+    n_dates = inarray.shape[0]
+    value_idx = np.arange(n_dates)
+    mask_idx = value_idx + n_dates
+
+    outarray[value_idx] = nodata
+    outarray[mask_idx] = 0
+
     scaled_pvir = pvir2 * 1000
-    outarray[valid[valid_condition]] = scaled_pvir[valid_condition]
+    outarray[value_idx[valid]] = scaled_pvir
+    outarray[mask_idx[valid[valid_condition]]] = 1
