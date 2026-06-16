@@ -17,7 +17,7 @@ force_params = {
     #########################
     #########Basics##########
     #########################
-    "project_name": "bare_soil_3tiles_1y_v1", #Project Name that will be the name of output folder in temp & result subfolder test_full_tile_all_time
+    "project_name": "bare_soil_filter_prmfile_", #Project Name that will be the name of output folder in temp & result subfolder test_full_tile_all_time
     "aoi": "/rvt_mount/3DTests/data/bare_soil/3tiles.shp", #Define Area of Interest as Shapefile
 
     #TimeSeriesStack (TSS) --> Real Spectral Values
@@ -38,10 +38,10 @@ force_advanced_params = {
     "hold": False,  # if True, cmd must be closed manually ## recommended for debugging FORCE
 
     #Streaming Mechanism
-    "TSS_NTHREAD_READ": 9,
-    "TSS_NTHREAD_COMPUTE": 11,
-    "TSS_NTHREAD_WRITE": 6,
-    "TSS_BLOCK_SIZE": 1000,
+    "TSS_NTHREAD_READ": 11,
+    "TSS_NTHREAD_COMPUTE": 22,
+    "TSS_NTHREAD_WRITE": 8,
+    "TSS_BLOCK_SIZE": 3000,
 }
 
 analysis_params = {
@@ -53,14 +53,24 @@ analysis_params = {
     "bare_soil_upper": 1371,  # values >= this threshold count as bare soil
     "min_consecutive": 3,     # require at least this many consecutive valid detections
     "mosaic": True,           # Mosaic the per-tile results
+    "aoi_path": force_params["aoi"], # Clip and export results using the same AOI-driven workflow as SITS_mowing
     "overwrite_results": True, # Whether to overwrite existing results (if False, will skip processing if results already exist)
     "debug_stats": True,       # Print additional statistics for debugging purposes
-    "cleanup_tss": False,      # Remove intermediate TSS & mask tiles after aggregation
+    "cleanup_tss": True,      # Remove intermediate TSS & mask tiles after aggregation
+    "write_stabilized_output": False, # Write an additional output with median-filtered bare-soil occurrences
+    "stabilized_filter_size": 3, # Median filter size for stabilized output
+    "write_weighted_output": False, # Write an additional weighted product based on distance to the thresholds
+    "weighted_threshold_scale": 150, # Distance scale for weighted detections; larger values make the weighting more gradual
 }
 
 analysis_advanced_params = {
     "process_folder": PROCESS_FOLDER,
     "tss_lst": None, # tss stacks will be automatically discovered inside the project folder
+}
+
+run_flags = {
+    "run_force": True,
+    "run_analysis": True,
 }
 
 def format_time(seconds):
@@ -76,25 +86,33 @@ if __name__ == '__main__':
     # profiler = cProfile.Profile()
     # profiler.enable()
 
-    # Measure time for force_baresoil
-    startzeit_force = time.time()
-    force_baresoil(**force_params, **force_advanced_params)
-    endzeit_force = time.time()
-    force_baresoil_time = endzeit_force - startzeit_force
-    print(f"tss executed in: {format_time(force_baresoil_time)}")
+    force_baresoil_time = 0
+    baresoil_time = 0
 
-    # Measure time forbaresoil
-    startzeit_baresoil = time.time()
-    baresoil(**analysis_params, **analysis_advanced_params)
-    endzeit_baresoil = time.time()
-    baresoil_time = endzeit_baresoil - startzeit_baresoil
-    print(f"Analysis executed in: {format_time(baresoil_time)}")
+    if run_flags["run_force"]:
+        startzeit_force = time.time()
+        force_baresoil(**force_params, **force_advanced_params)
+        endzeit_force = time.time()
+        force_baresoil_time = endzeit_force - startzeit_force
+        print(f"tss executed in: {format_time(force_baresoil_time)}")
+    else:
+        print("Skipping FORCE processing (`run_force=False`).")
+
+    if run_flags["run_analysis"]:
+        startzeit_baresoil = time.time()
+        baresoil(**analysis_params, **analysis_advanced_params)
+        endzeit_baresoil = time.time()
+        baresoil_time = endzeit_baresoil - startzeit_baresoil
+        print(f"Analysis executed in: {format_time(baresoil_time)}")
+    else:
+        print("Skipping bare-soil analysis/export (`run_analysis=False`).")
 
     # Total time
     total_time = force_baresoil_time + baresoil_time
     print(f"Total execution time: {format_time(total_time)}")
     print("Force params:", force_params)
     print("Analysis params:", analysis_params)
+    print("Run flags:", run_flags)
     # profiler.disable()
     # stats = pstats.Stats(profiler).sort_stats("cumtime")
     # stats.print_stats()

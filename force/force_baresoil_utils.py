@@ -2,121 +2,10 @@ import os
 import subprocess
 import time
 import shutil
-import glob
-import numpy as np
-import rasterio
-from rasterio.mask import mask as rio_mask
+import datetime as dt
 import geopandas as gpd
-
-
-def _clip_raster_to_aoi(raster_path, aoi_gdf):
-    if aoi_gdf is None or aoi_gdf.empty:
-        return
-    with rasterio.open(raster_path) as src:
-        clip_gdf = aoi_gdf
-        if clip_gdf.crs and src.crs and clip_gdf.crs != src.crs:
-            clip_gdf = clip_gdf.to_crs(src.crs)
-        try:
-            out_image, out_transform = rio_mask(
-                src,
-                clip_gdf.geometry,
-                crop=True,
-                filled=True,
-                nodata=src.nodata
-            )
-        except ValueError:
-            return
-        out_meta = src.meta.copy()
-        out_meta.update({
-            "height": out_image.shape[1],
-            "width": out_image.shape[2],
-            "transform": out_transform
-        })
-        tmp_path = raster_path + ".clip"
-        with rasterio.open(tmp_path, 'w', **out_meta) as dst:
-            dst.write(out_image)
-            for idx, desc in enumerate(src.descriptions, start=1):
-                if desc:
-                    dst.set_band_description(idx + 1, desc)
-        os.replace(tmp_path, raster_path)
-
-
-def _split_mask_stacks(process_folder, project_name, aoi_path):
-    aoi_gdf = None
-    if aoi_path and os.path.exists(aoi_path):
-        try:
-            aoi_gdf = gpd.read_file(aoi_path)
-        except Exception as exc:
-            print(f"Warning: unable to read AOI for clipping ({aoi_path}): {exc}")
-            aoi_gdf = None
-
-    tiles_root = os.path.join(process_folder, "temp", project_name, "tiles_tss")
-    search_pattern = os.path.join(tiles_root, "X*", "*.tif")
-    for raster_path in glob.glob(search_pattern):
-        if raster_path.endswith("_mask.tif"):
-            continue
-        mask_path = raster_path.replace('.tif', '_mask.tif')
-        if os.path.exists(mask_path):
-            continue
-        try:
-            with rasterio.open(raster_path) as src:
-                total_bands = src.count
-                if total_bands <= 1:
-                    print(f"Skipping mask split for {raster_path}; unexpected band count {total_bands}.")
-                    continue
-
-                descriptions = src.descriptions
-                mask_start_idx = None
-                for idx, desc in enumerate(descriptions, start=1):
-                    if desc and desc.endswith("_MASK"):
-                        mask_start_idx = idx
-                        break
-
-                if mask_start_idx is None:
-                    print(f"Skipping mask split for {raster_path}; mask bands not detected.")
-                    continue
-
-                value_count = mask_start_idx - 1
-                mask_count = total_bands - value_count
-                if value_count <= 0 or mask_count <= 0:
-                    print(f"Skipping mask split for {raster_path}; invalid band partition ({value_count}/{mask_count}).")
-                    continue
-
-                value_meta = src.meta.copy()
-                value_meta.update(count=value_count)
-                mask_meta = src.meta.copy()
-                mask_meta.update(count=mask_count, dtype='uint8', nodata=0)
-                value_desc = descriptions[:value_count]
-                mask_desc = descriptions[value_count:value_count + mask_count]
-
-                tmp_values = raster_path + ".tmp"
-                with rasterio.open(tmp_values, 'w', **value_meta) as dst_val:
-                    for idx in range(value_count):
-                        band_data = src.read(idx + 1)
-                        dst_val.write(band_data, idx + 1)
-                        desc = value_desc[idx] if idx < len(value_desc) else ''
-                        if desc:
-                            dst_val.set_band_description(idx + 1, desc)
-
-                with rasterio.open(mask_path, 'w', **mask_meta) as dst_mask:
-                    for idx in range(mask_count):
-                        mask_band = src.read(value_count + idx + 1).astype(np.uint8)
-                        dst_mask.write(mask_band, idx + 1)
-                        if idx < len(mask_desc) and mask_desc[idx]:
-                            desc = mask_desc[idx]
-                        elif idx < len(value_desc) and value_desc[idx]:
-                            desc = f"{value_desc[idx]}_MASK"
-                        else:
-                            desc = ''
-                        if desc:
-                            dst_mask.set_band_description(idx + 1, desc)
-
-                os.replace(tmp_values, raster_path)
-                _clip_raster_to_aoi(raster_path, aoi_gdf)
-                if os.path.exists(mask_path):
-                    _clip_raster_to_aoi(mask_path, aoi_gdf)
-        except Exception as exc:
-            print(f"Masked processed {raster_path}")
+import rasterio
+from pathlib import Path
 
 def replace_parameters(filename, replacements):
     with open(filename, 'r') as f:
@@ -158,6 +47,158 @@ def check_and_reproject_shapefile(shapefile_path, target_epsg=3035):
         print("Shapefile is already in EPSG: 3035")
         return shapefile_path
 
+
+def run_shell_command(cmd, hold=False):
+    if hold:
+        subprocess.run(['xterm', '-hold', '-e', cmd])
+    else:
+        subprocess.run(['xterm', '-e', cmd])
+
+
+def parse_date_range(date_range):
+    start_token, end_token = date_range.split()
+    start_date = dt.datetime.strptime(start_token, "%Y-%m-%d").date()
+    end_date = dt.datetime.strptime(end_token, "%Y-%m-%d").date()
+    return start_date, end_date
+
+
+def parse_band_date(description):
+    if not description:
+        return None
+    token = description[:8]
+    try:
+        return dt.datetime.strptime(token, "%Y%m%d").date()
+    except ValueError:
+        return None
+
+
+def validate_force_output_descriptions(descriptions, start_date, end_date):
+    if not descriptions or not any(descriptions):
+        return False
+
+    mask_start_idx = next(
+        (idx for idx, desc in enumerate(descriptions) if desc and desc.endswith("_MASK")),
+        None,
+    )
+    if mask_start_idx is None:
+        return False
+
+    value_desc = descriptions[:mask_start_idx]
+    mask_desc = descriptions[mask_start_idx:]
+    if not value_desc or len(value_desc) != len(mask_desc):
+        return False
+
+    parsed_dates = []
+    previous_date = None
+    for value_description, mask_description in zip(value_desc, mask_desc):
+        parsed_date = parse_band_date(value_description)
+        if parsed_date is None:
+            return False
+        if parsed_date < start_date or parsed_date > end_date:
+            return False
+        if previous_date is not None and parsed_date < previous_date:
+            return False
+        if mask_description != f"{value_description}_MASK":
+            return False
+        parsed_dates.append(parsed_date)
+        previous_date = parsed_date
+
+    return len(set(parsed_dates)) == len(parsed_dates)
+
+
+def raster_is_readable(raster_path, expected_band_count=None, require_band_descriptions=False):
+    try:
+        if not raster_path.is_file() or raster_path.stat().st_size <= 0:
+            return False
+        with rasterio.open(raster_path) as src:
+            if src.count <= 0:
+                return False
+            if expected_band_count is not None and src.count != expected_band_count:
+                return False
+            if src.width <= 0 or src.height <= 0:
+                return False
+            sample = src.read(1, window=((0, min(1, src.height)), (0, min(1, src.width))))
+            if sample.size == 0:
+                return False
+            if require_band_descriptions:
+                descriptions = list(src.descriptions)
+                if not descriptions or not any(desc for desc in descriptions):
+                    return False
+        return True
+    except Exception:
+        return False
+
+
+def force_tile_is_complete(raster_path, start_date, end_date):
+    try:
+        raster_path = Path(raster_path)
+        if not raster_path.is_file() or raster_path.stat().st_size <= 0:
+            return False
+        with rasterio.open(raster_path) as src:
+            if src.count <= 0 or src.width <= 0 or src.height <= 0:
+                return False
+            if src.count % 2 != 0:
+                return False
+            sample = src.read(1, window=((0, min(1, src.height)), (0, min(1, src.width))))
+            if sample.size == 0:
+                return False
+            descriptions = list(src.descriptions)
+        return validate_force_output_descriptions(descriptions, start_date, end_date)
+    except Exception:
+        return False
+
+
+def tile_has_complete_output(tile_dir, start_date, end_date):
+    if not tile_dir.is_dir():
+        return False
+    tif_files = sorted(tile_dir.glob("*.tif"))
+    if not tif_files:
+        return False
+    return any(force_tile_is_complete(tif_file, start_date, end_date) for tif_file in tif_files)
+
+
+def generate_tiles_to_process(process_folder, project_name, date_range):
+    output_root = Path(process_folder) / "temp" / project_name / "tiles_tss"
+    tile_extent_file = Path(process_folder) / "temp" / project_name / "tile_extent.txt"
+    output_tile_list = Path(process_folder) / "temp" / project_name / "provenance" / "resume_tiles.txt"
+    start_date, end_date = parse_date_range(date_range)
+
+    if not tile_extent_file.is_file():
+        raise FileNotFoundError(f"Tile extent file not found: {tile_extent_file}")
+
+    with open(tile_extent_file, 'r') as file:
+        lines = file.readlines()
+        all_tiles = [line.strip() for line in lines if line.strip()][1:]
+
+    all_tiles = sorted(set(all_tiles))
+    tiles_to_process = []
+    completed_tiles = 0
+
+    for tile in all_tiles:
+        tile_dir = output_root / tile
+        if tile_has_complete_output(tile_dir, start_date, end_date):
+            completed_tiles += 1
+        else:
+            tiles_to_process.append(tile)
+
+    output_tile_list.parent.mkdir(parents=True, exist_ok=True)
+    with open(output_tile_list, 'w') as file:
+        file.write(f"{len(tiles_to_process)}\n")
+        for tile in tiles_to_process:
+            file.write(f"{tile}\n")
+
+    print(
+        f"Tiles complete: {completed_tiles} | "
+        f"tiles remaining: {len(tiles_to_process)} | "
+        f"resume list written to: {output_tile_list}"
+    )
+    return output_tile_list, len(tiles_to_process)
+
+
+def should_run_mask_stage(mask_project_dir, aoi_basename):
+    mosaic_tif = mask_project_dir / aoi_basename.replace(".shp", ".tif")
+    return not raster_is_readable(mosaic_tif)
+
 def force_baresoil(project_name,aoi,TSS_Sensors,TSS_DATE_RANGE,process_folder,force_dir,TSS_SPECTRAL_ADJUST,TSS_ABOVE_NOISE,TSS_BELOW_NOISE,hold,TSS_NTHREAD_READ,TSS_NTHREAD_COMPUTE,
                    TSS_NTHREAD_WRITE,TSS_BLOCK_SIZE,**kwargs):
 
@@ -167,72 +208,74 @@ def force_baresoil(project_name,aoi,TSS_Sensors,TSS_DATE_RANGE,process_folder,fo
     force_skel = f"{scripts_skel}/force_cube_sceleton"
     temp_folder = process_folder + "/temp"
     mask_folder = process_folder + "/temp/_mask"
+    project_temp_dir = Path(temp_folder) / project_name
+    mask_project_dir = Path(mask_folder) / project_name
 
     startzeit = time.time()
 
     aoi = check_and_reproject_shapefile(aoi)
     ### get force extend
-    os.makedirs(f"{temp_folder}/{project_name}", exist_ok=True)
+    os.makedirs(project_temp_dir, exist_ok=True)
 
     subprocess.run(['sudo', 'chmod', '-R', '777', f"{temp_folder}"])
 
-    shutil.copy(f"{force_skel}/datacube-definition.prj",f"{temp_folder}/{project_name}/datacube-definition.prj")
+    shutil.copy(f"{force_skel}/datacube-definition.prj",f"{project_temp_dir}/datacube-definition.prj")
 
-    cmd = f"sudo docker run -v {local_dir} -v {force_dir} davidfrantz/force " \
-           f"force-tile-extent {aoi} {force_skel} {temp_folder}/{project_name}/tile_extent.txt"
-
-    if hold == True:
-        subprocess.run(['xterm','-hold','-e', cmd])
+    tile_extent_path = project_temp_dir / "tile_extent.txt"
+    if not tile_extent_path.is_file():
+        cmd = f"sudo docker run -v {local_dir} -v {force_dir} davidfrantz/force " \
+               f"force-tile-extent {aoi} {force_skel} {tile_extent_path}"
+        run_shell_command(cmd, hold=hold)
     else:
-        subprocess.run(['xterm', '-e', cmd])
+        print(f"Reusing existing tile extent file: {tile_extent_path}")
 
-    subprocess.run(['sudo', 'chmod', '-R', '777', f"{temp_folder}/{project_name}"])
+    subprocess.run(['sudo', 'chmod', '-R', '777', f"{project_temp_dir}"])
 
     ### mask
 
-    os.makedirs(f"{mask_folder}/{project_name}", exist_ok=True)
-    shutil.copy(f"{force_skel}/datacube-definition.prj",f"{mask_folder}/{project_name}/datacube-definition.prj")
+    os.makedirs(mask_project_dir, exist_ok=True)
+    shutil.copy(f"{force_skel}/datacube-definition.prj",f"{mask_project_dir}/datacube-definition.prj")
 
-    cmd = f"sudo docker run -v {local_dir} davidfrantz/force " \
-          f"force-cube -o {mask_folder}/{project_name} " \
-          f"{aoi}"
+    if should_run_mask_stage(mask_project_dir, os.path.basename(aoi)):
+        cmd = f"sudo docker run -v {local_dir} davidfrantz/force " \
+              f"force-cube -o {mask_project_dir} " \
+              f"{aoi}"
+        run_shell_command(cmd, hold=hold)
 
-    if hold == True:
-        subprocess.run(['xterm','-hold','-e', cmd])
+        cmd = f"sudo docker run -v {local_dir} davidfrantz/force " \
+              f"force-mosaic {mask_project_dir}"
+        run_shell_command(cmd, hold=hold)
     else:
-        subprocess.run(['xterm', '-e', cmd])
+        print(f"Reusing existing mask mosaic in: {mask_project_dir}")
 
-
-    ###mask mosaic
-    cmd = f"sudo docker run -v {local_dir} davidfrantz/force " \
-          f"force-mosaic {mask_folder}/{project_name}"
-
-    if hold == True:
-        subprocess.run(['xterm','-hold','-e', cmd])
-    else:
-        subprocess.run(['xterm', '-e', cmd])
-
-    subprocess.run(['sudo', 'chmod', '-R', '777', f"{mask_folder}/{project_name}"])
+    subprocess.run(['sudo', 'chmod', '-R', '777', f"{mask_project_dir}"])
 
     #analysis_tss
     ###force param
-    os.makedirs(f"{temp_folder}/{project_name}", exist_ok=True)
-    os.makedirs(f"{temp_folder}/{project_name}/provenance", exist_ok=True)
-    os.makedirs(f"{temp_folder}/{project_name}/tiles_tss", exist_ok=True)
-    shutil.copy(f"{force_skel}/datacube-definition.prj",f"{temp_folder}/{project_name}/datacube-definition.prj")
-    shutil.copy(f"{force_skel}/datacube-definition.prj",f"{temp_folder}/{project_name}/tiles_tss/datacube-definition.prj")
-    shutil.copy(f"{scripts_skel}/UDF_NoCom.prm", f"{temp_folder}/{project_name}/pvir_tss.prm")
-    shutil.copy(f"{scripts_skel}/pvir_skel_tss.py",f"{temp_folder}/{project_name}/pvir_tss.py")
+    os.makedirs(project_temp_dir, exist_ok=True)
+    os.makedirs(project_temp_dir / "provenance", exist_ok=True)
+    os.makedirs(project_temp_dir / "tiles_tss", exist_ok=True)
+    shutil.copy(f"{force_skel}/datacube-definition.prj",f"{project_temp_dir}/datacube-definition.prj")
+    shutil.copy(f"{force_skel}/datacube-definition.prj",f"{project_temp_dir}/tiles_tss/datacube-definition.prj")
+    shutil.copy(f"{scripts_skel}/UDF_NoCom.prm", f"{project_temp_dir}/pvir_tss.prm")
+    shutil.copy(f"{scripts_skel}/pvir_skel_tss.py",f"{project_temp_dir}/pvir_tss.py")
 
-    X_TILE_RANGE, Y_TILE_RANGE = extract_coordinates(f"{temp_folder}/{project_name}/tile_extent.txt")
+    resume_tile_path, tiles_remaining = generate_tiles_to_process(process_folder, project_name, TSS_DATE_RANGE)
+    if tiles_remaining == 0:
+        print("All FORCE tiles are already complete. Skipping force-higher-level.")
+        endzeit = time.time()
+        print("FORCE-Processing beendet nach "+str((endzeit-startzeit)/60)+" Minuten")
+        return
+
+    X_TILE_RANGE, Y_TILE_RANGE = extract_coordinates(str(tile_extent_path))
     # Define replacements
     replacements = {
         # INPUT/OUTPUT DIRECTORIES
         f'DIR_LOWER = NULL':f'DIR_LOWER = {force_dir.split(":")[0]}/FORCE/C1/L2/ard',
-        f'DIR_HIGHER = NULL':f'DIR_HIGHER = {temp_folder}/{project_name}/tiles_tss',
-        f'DIR_PROVENANCE = NULL':f'DIR_PROVENANCE = {temp_folder}/{project_name}/provenance',
+        f'DIR_HIGHER = NULL':f'DIR_HIGHER = {project_temp_dir}/tiles_tss',
+        f'DIR_PROVENANCE = NULL':f'DIR_PROVENANCE = {project_temp_dir}/provenance',
         # MASKING
-        f'DIR_MASK = NULL':f'DIR_MASK = {mask_folder}/{project_name}',
+        f'DIR_MASK = NULL':f'DIR_MASK = {mask_project_dir}',
         f'BASE_MASK = NULL':f'BASE_MASK = {os.path.basename(aoi).replace(".shp",".tif")}',
         # PARALLEL PROCESSING
         f'NTHREAD_READ = 8':f'NTHREAD_READ = {TSS_NTHREAD_READ}',
@@ -241,6 +284,7 @@ def force_baresoil(project_name,aoi,TSS_Sensors,TSS_DATE_RANGE,process_folder,fo
         # PROCESSING EXTENT AND RESOLUTION
         f'X_TILE_RANGE = 0 0':f'X_TILE_RANGE = {X_TILE_RANGE}',
         f'Y_TILE_RANGE = 0 0':f'Y_TILE_RANGE = {Y_TILE_RANGE}',
+        f'FILE_TILE = NULL':f'FILE_TILE = {resume_tile_path}',
         f'BLOCK_SIZE = 0':f'BLOCK_SIZE = {TSS_BLOCK_SIZE}',
         # SENSOR ALLOW-LIST
         f'SENSORS = LND08 LND09 SEN2A SEN2B':f'SENSORS = {TSS_Sensors}',
@@ -252,25 +296,21 @@ def force_baresoil(project_name,aoi,TSS_Sensors,TSS_DATE_RANGE,process_folder,fo
         # PROCESSING TIMEFRAME
         f'DATE_RANGE = 2010-01-01 2019-12-31':f'DATE_RANGE = {TSS_DATE_RANGE}',
         # PYTHON UDF PARAMETERS
-        f'FILE_PYTHON = NULL':f'FILE_PYTHON = {temp_folder}/{project_name}/pvir_tss.py',
+        f'FILE_PYTHON = NULL':f'FILE_PYTHON = {project_temp_dir}/pvir_tss.py',
         f'PYTHON_TYPE = PIXEL':f'PYTHON_TYPE = PIXEL',
         f'OUTPUT_PYP = FALSE': f'OUTPUT_PYP = TRUE',
     }
 
 
     # Replace parameters in the file
-    replace_parameters(f"{temp_folder}/{project_name}/pvir_tss.prm", replacements)
+    replace_parameters(f"{project_temp_dir}/pvir_tss.prm", replacements)
 
     cmd = f"sudo docker run -it -v {local_dir} -v {force_dir} davidfrantz/force " \
-          f"force-higher-level {temp_folder}/{project_name}/pvir_tss.prm"
+          f"force-higher-level {project_temp_dir}/pvir_tss.prm"
 
     subprocess.run(['sudo', 'chmod', '-R', '777', f"{temp_folder}"])
-    if hold == True:
-        subprocess.run(['xterm', '-hold', '-e', cmd])
-    else:
-        subprocess.run(['xterm', '-e', cmd])
+    run_shell_command(cmd, hold=hold)
 
-    subprocess.run(['sudo', 'chmod', '-R', '777', f"{temp_folder}/{project_name}"])
-    _split_mask_stacks(process_folder, project_name, aoi)
+    subprocess.run(['sudo', 'chmod', '-R', '777', f"{project_temp_dir}"])
     endzeit = time.time()
     print("FORCE-Processing beendet nach "+str((endzeit-startzeit)/60)+" Minuten")

@@ -1,9 +1,21 @@
 import numpy as np
-import time
-from datetime import datetime, timedelta, date
+from datetime import timedelta, date
 
 # some global config variables
 start = date.fromisoformat('1970-01-01')
+BAND_INDEX = {}
+
+
+def _get_band_index(bandnames, target_name):
+    try:
+        return BAND_INDEX[target_name]
+    except KeyError:
+        matches = np.flatnonzero(bandnames == target_name)
+        if matches.size == 0:
+            raise ValueError(f"Band '{target_name.decode('utf-8')}' not found in FORCE bandnames")
+        index = int(matches[0])
+        BAND_INDEX[target_name] = index
+        return index
 
 def forcepy_init(dates, sensors, bandnames):
     """
@@ -14,6 +26,9 @@ def forcepy_init(dates, sensors, bandnames):
 
     base = [f'{(start+timedelta(days=int(dat))).year}{(start+timedelta(days=int(dat))).month:02d}{(start+timedelta(days=int(dat))).day:02d}_{sens.decode("utf-8")}' for dat, sens in zip(dates, sensors)]
     mask = [f"{label}_MASK" for label in base]
+    BAND_INDEX.clear()
+    for band_name in (b'RED', b'NIR', b'BROADNIR', b'SWIR1', b'SWIR2'):
+        _get_band_index(bandnames, band_name)
     return base + mask
 
 
@@ -28,56 +43,48 @@ def forcepy_pixel(inarray, outarray, dates, sensors, bandnames, nodata, nproc):
     nproc:     number of allowed processes/threads
     Write results into outarray.
     """
-
-    inarray = inarray.astype(np.float32)
-    inarray = inarray[:, :, 0, 0]
-    invalid = inarray == nodata  ## bool mask values
-    ## bool qai masks
-
-    valid = np.where(inarray[:, 0] != nodata)[0]  # skip no data; just check first band
-
-    if len(valid) == 0:
+    inarray = inarray[:, :, 0, 0].astype(np.float32, copy=False)
+    valid_mask = inarray[:, 0] != nodata
+    if not np.any(valid_mask):
         return
-    inarray[invalid] = np.nan
+    valid_idx = np.flatnonzero(valid_mask)
+    vals = inarray[valid_idx, :]
 
-    #BANDS
-    #green = np.argwhere(bandnames == b'GREEN')[0][0]
-    #blue = np.argwhere(bandnames == b'BLUE')[0][0]
-    red = np.argwhere(bandnames == b'RED')[0][0]
-    # re1 = np.argwhere(bandnames == b'REDEDGE1')[0][0]
-    # re2 = np.argwhere(bandnames == b'REDEDGE2')[0][0]
-    nir = np.argwhere(bandnames == b'NIR')[0][0]
-    bnir = np.argwhere(bandnames == b'BROADNIR')[0][0]
-    swir1 = np.argwhere(bandnames == b'SWIR1')[0][0]
-    swir2 = np.argwhere(bandnames == b'SWIR2')[0][0]
+    red = _get_band_index(bandnames, b'RED')
+    bnir = _get_band_index(bandnames, b'BROADNIR')
+    swir2 = _get_band_index(bandnames, b'SWIR2')
 
-    vals = inarray[valid, :]
+    fill = np.full(vals.shape[0], np.nan, dtype=np.float32)
+    ndvi_like = np.divide(
+        vals[:, bnir] - vals[:, red],
+        vals[:, bnir] + vals[:, red],
+        out=fill.copy(),
+        where=(vals[:, bnir] + vals[:, red]) != 0
+    )
+    nbr2_like = np.divide(
+        vals[:, bnir] - vals[:, swir2],
+        vals[:, bnir] + vals[:, swir2],
+        out=fill.copy(),
+        where=(vals[:, bnir] + vals[:, swir2]) != 0
+    )
+    pvir2 = ndvi_like + nbr2_like
 
-    #INDEXES
-
-    # dswi = (vals[:,nir] + vals[:,green]) / (vals[:,swir1] + vals[:,red])
-    # # NBR = (BNIR - SWIR2) / (BNIR + SWIR2)
-    # nbr = (vals[:, bnir] - vals[:, swir2]) / (vals[:, bnir] + vals[:, swir2])
-    # # NDVI = (BNIR - RED) / (BNIR + RED)
-    # ndvi = (vals[:, bnir] - vals[:, red]) / (vals[:, bnir] + vals[:, red])
-    pvir2 = (((vals[:, bnir] - vals[:, red]) / (vals[:, bnir] + vals[:, red])) + ((vals[:, bnir] - vals[:, swir2]) / (vals[:, bnir] + vals[:, swir2])))
-    # # ARI = BNIR * ((1 / GREEN) - (1 / RE1))
-    # ari = vals[:, bnir] * ((1 / vals[:, green]) - (1 / vals[:, re1]))
-    # # CRI = (1 / BLUE) - (1 / GREEN)
-    #ndvi = (vals[:, nir] - vals[:, red]) / (vals[:, nir] + vals[:, red])
-    #dswi = (vals[:,nir] + vals[:,green]) / (vals[:,swir1] + vals[:,red])
-    # # calculate NDTI ((Band 11(SWIR1) - Band 12(SWIR2)) / Band 11(SWIR1) + Band 12(SWIR2)))
-    #ndti = (vals[:, swir1] - vals[:, swir2]) / (vals[:, swir1] + vals[:, swir2])
-    #ndti[np.isnan(ndti)] = nodata
-
-    swir_nir_ratio = np.divide(
-        vals[:, swir1] - vals[:, nir],
-        vals[:, swir1] + vals[:, nir],
-        out=np.full(vals.shape[0], np.nan, dtype=np.float32),
-        where=(vals[:, swir1] + vals[:, nir]) != 0
+    nir_swir2_ratio = np.divide(
+        vals[:, bnir],
+        vals[:, swir2],
+        out=fill.copy(),
+        where=vals[:, swir2] != 0
     )
 
-    valid_condition = swir_nir_ratio >= 0.02
+    valid_bands = (
+        np.isfinite(vals[:, red]) &
+        np.isfinite(vals[:, bnir]) &
+        np.isfinite(vals[:, swir2]) &
+        (vals[:, red] > 0) &
+        (vals[:, bnir] > 0) &
+        (vals[:, swir2] > 0)
+    )
+    valid_condition = valid_bands & np.isfinite(pvir2) & (nir_swir2_ratio >= 0.02)
 
     n_dates = inarray.shape[0]
     value_idx = np.arange(n_dates)
@@ -87,5 +94,5 @@ def forcepy_pixel(inarray, outarray, dates, sensors, bandnames, nodata, nproc):
     outarray[mask_idx] = 0
 
     scaled_pvir = pvir2 * 1000
-    outarray[value_idx[valid]] = scaled_pvir
-    outarray[mask_idx[valid[valid_condition]]] = 1
+    outarray[value_idx[valid_idx]] = scaled_pvir
+    outarray[mask_idx[valid_idx[valid_condition]]] = 1
