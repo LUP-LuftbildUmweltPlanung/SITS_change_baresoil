@@ -3,6 +3,7 @@ import subprocess
 import time
 import shutil
 import datetime as dt
+import sys
 import geopandas as gpd
 import rasterio
 from pathlib import Path
@@ -48,11 +49,42 @@ def check_and_reproject_shapefile(shapefile_path, target_epsg=3035):
         return shapefile_path
 
 
-def run_shell_command(cmd, hold=False):
+def run_shell_command(cmd, hold=False, stage_name=None, log_path=None):
+    stage_label = stage_name or "FORCE stage"
+    print(f"[START] {stage_label}")
+    print(f"Running command: {cmd}")
+    start_time = time.time()
     if hold:
-        subprocess.run(['xterm', '-hold', '-e', cmd])
+        result = subprocess.run(
+            ['xterm', '-hold', '-e', 'bash', '-lc', cmd],
+            check=False,
+        )
     else:
-        subprocess.run(['xterm', '-e', cmd])
+        log_handle = open(log_path, "a", encoding="utf-8") if log_path else None
+        try:
+            process = subprocess.Popen(
+                cmd,
+                shell=True,
+                executable='/bin/bash',
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                bufsize=1,
+            )
+            for line in process.stdout:
+                sys.stdout.write(line)
+                if log_handle:
+                    log_handle.write(line)
+            result_code = process.wait()
+        finally:
+            if log_handle:
+                log_handle.close()
+        result = subprocess.CompletedProcess(cmd, result_code)
+
+    if result.returncode != 0:
+        raise RuntimeError(f"Command failed with exit code {result.returncode}: {cmd}")
+    elapsed = time.time() - start_time
+    print(f"[DONE] {stage_label} in {elapsed / 60:.2f} minutes")
 
 
 def parse_date_range(date_range):
@@ -210,12 +242,14 @@ def force_baresoil(project_name,aoi,TSS_Sensors,TSS_DATE_RANGE,process_folder,fo
     mask_folder = process_folder + "/temp/_mask"
     project_temp_dir = Path(temp_folder) / project_name
     mask_project_dir = Path(mask_folder) / project_name
+    log_dir = project_temp_dir / "provenance" / "logs"
 
     startzeit = time.time()
 
     aoi = check_and_reproject_shapefile(aoi)
     ### get force extend
     os.makedirs(project_temp_dir, exist_ok=True)
+    os.makedirs(log_dir, exist_ok=True)
 
     subprocess.run(['sudo', 'chmod', '-R', '777', f"{temp_folder}"])
 
@@ -225,7 +259,12 @@ def force_baresoil(project_name,aoi,TSS_Sensors,TSS_DATE_RANGE,process_folder,fo
     if not tile_extent_path.is_file():
         cmd = f"sudo docker run -v {local_dir} -v {force_dir} davidfrantz/force " \
                f"force-tile-extent {aoi} {force_skel} {tile_extent_path}"
-        run_shell_command(cmd, hold=hold)
+        run_shell_command(
+            cmd,
+            hold=hold,
+            stage_name="force-tile-extent",
+            log_path=log_dir / "force-tile-extent.log",
+        )
     else:
         print(f"Reusing existing tile extent file: {tile_extent_path}")
 
@@ -240,11 +279,21 @@ def force_baresoil(project_name,aoi,TSS_Sensors,TSS_DATE_RANGE,process_folder,fo
         cmd = f"sudo docker run -v {local_dir} davidfrantz/force " \
               f"force-cube -o {mask_project_dir} " \
               f"{aoi}"
-        run_shell_command(cmd, hold=hold)
+        run_shell_command(
+            cmd,
+            hold=hold,
+            stage_name="force-cube mask generation",
+            log_path=log_dir / "force-cube.log",
+        )
 
         cmd = f"sudo docker run -v {local_dir} davidfrantz/force " \
               f"force-mosaic {mask_project_dir}"
-        run_shell_command(cmd, hold=hold)
+        run_shell_command(
+            cmd,
+            hold=hold,
+            stage_name="force-mosaic mask merge",
+            log_path=log_dir / "force-mosaic.log",
+        )
     else:
         print(f"Reusing existing mask mosaic in: {mask_project_dir}")
 
@@ -305,11 +354,16 @@ def force_baresoil(project_name,aoi,TSS_Sensors,TSS_DATE_RANGE,process_folder,fo
     # Replace parameters in the file
     replace_parameters(f"{project_temp_dir}/pvir_tss.prm", replacements)
 
-    cmd = f"sudo docker run -it -v {local_dir} -v {force_dir} davidfrantz/force " \
+    cmd = f"sudo docker run -v {local_dir} -v {force_dir} davidfrantz/force " \
           f"force-higher-level {project_temp_dir}/pvir_tss.prm"
 
     subprocess.run(['sudo', 'chmod', '-R', '777', f"{temp_folder}"])
-    run_shell_command(cmd, hold=hold)
+    run_shell_command(
+        cmd,
+        hold=hold,
+        stage_name=f"force-higher-level ({tiles_remaining} tiles remaining)",
+        log_path=log_dir / "force-higher-level.log",
+    )
 
     subprocess.run(['sudo', 'chmod', '-R', '777', f"{project_temp_dir}"])
     endzeit = time.time()

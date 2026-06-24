@@ -1,71 +1,155 @@
 # SITS_change_baresoil
 
-Baresoil algorithm for change detection based on FORCE Datacube.
+Bare-soil annual mapping workflow based on FORCE time-series stacks and a PVIR2 threshold approach.
 
-## 1. Installing
-```
-conda create --name SITSclass python==3.9
-conda activate SITSclass
-cd /path/to/repository/SITS_classification
+## What this repository does
+
+The workflow has two stages:
+
+1. `FORCE` stage:
+   - builds the time-series stack over the AOI
+   - supports tile resume, so a crashed run can continue from incomplete tiles
+2. `Analysis` stage:
+   - computes yearly bare-soil summaries from the FORCE outputs
+   - exports a final annual raster named `bare-soil_<YEAR>_v1_0.tif`
+   - can optionally export a weighted variant `bare-soil_<YEAR>_weighted_v1_0.tif`
+
+The standard output has 3 bands:
+
+- band 1: `bare_soil_ratio`
+- band 2: `bare_soil_occurrences`
+- band 3: `valid_observation_count`
+
+## Requirements
+
+System requirements:
+
+- Python `3.9`
+- Docker
+- `xterm`
+- GDAL command-line tools: `gdalbuildvrt`, `gdal_translate`, `gdalwarp`
+- a mounted FORCE datacube
+
+Python environment:
+
+```bash
+conda create --name sits-baresoil python=3.9
+conda activate sits-baresoil
 pip install -r requirements.txt
-sudo apt-get install xterm
 ```
 
-_**Notes:**_
+Ubuntu packages usually needed:
 
-Code is build upon FORCE-Datacube and -Framework (Docker, FORCE-Version 3.7.12)
+```bash
+sudo apt-get update
+sudo apt-get install -y xterm gdal-bin
+```
 
-[How to Install FORCE with Docker](https://force-eo.readthedocs.io/en/latest/setup/docker.html#docker)
+FORCE is expected to be available through Docker. See the official FORCE Docker documentation:
 
+- <https://force-eo.readthedocs.io/en/latest/setup/docker.html>
 
-## 2. Getting Started
+## Portable setup
 
+This repository now supports two normal ways of running:
 
-### 2.1 Basics
+1. edit the defaults at the top of [baresoil_main.py](/rvt_mount/SITS_change_baresoil/baresoil_main.py:13)
+2. keep the file generic and override values from the command line
 
-This repository contains the code necessary to run change detection for Satellite Image Time Series with [bare soil Algorithm](https://geoservice.dlr.de/web/datasets/soilsuite_eur_5y) based on the [FORCE Datacube](https://force-eo.readthedocs.io/en/latest/index.html). 
-It's based on the following folder structure:
-<div align="center">
-<img src="img/baresoil_spectral_index.png" width="500" height="420">
-</div>
-The bare soil algorithm is based in the spectral index PV + IR2 (bare soil index). The spectral index is calculated for the entire time series with Sentinel-2. 
-The formula is as follows: 
-PV + IR2 = ((NIR - RED) / (NIR + RED) + (NIR - SWIR2) / (NIR + SWIR2)).
+For another VM, the important machine-specific values are:
 
-Some filters are applied to the spectral index time series to reduce noise and outliers. The following filters are applied:
-* Minimal soil count: A pixel falls into the valid mask, if it is detected three times as bare soil. This mitigates the effect of spurious outliers.
-* Nir/Swir2 filter: A pixel falls into the valid mask, if the NIR/SWIR2 ratio is above or equal to 0.02.
-* Threshold filter: The PV + IR2 value must be under or equal to 173 and above or equal to 1371 to be considered as valid. 
+- `project_name`
+- `aoi`
+- `process_folder`
+- `force_dir`
+- `TSS_DATE_RANGE`
 
-All filters are obtained from [SoilSuite Europe data description](https://geoservice.dlr.de/web/datasets/soilsuite_eur_5y).
+## Running
 
-The final result consists on a tif file with 3 bands:
-* Band 1: Provides the number of bare soil occurrences over the total number of valid observation for each pixel as a percentage. 
-This is calculated as the number of times a pixel is detected as bare soil divided by the total number of valid observations for that pixel. 
-The resulting percentage indicates how frequently a pixel is classified as bare soil over the observed time period.
-* Band 2: Provides the number of bare soil occurrences.
-* Band 3: Provides the total number of valid observation for each pixel.
+Run the full workflow:
 
+```bash
+python3 baresoil_main.py
+```
 
-### 2.2 Workflow
+Run only FORCE:
 
-To execute the script simply set parameters in baresoil_main and execute the file.
+```bash
+python3 baresoil_main.py --force-only
+```
+
+Run only the analysis/mosaicing step:
+
+```bash
+python3 baresoil_main.py --analysis-only
+```
+
+Example with command-line overrides:
+
+```bash
+python3 baresoil_main.py \
+  --project-name bare_soil_2018 \
+  --aoi /data/aoi/germany.shp \
+  --process-folder /data/process \
+  --force-dir /force \
+  --date-range "2018-01-01 2018-12-31" \
+  --write-weighted-output true
+```
+
+## Configuration notes
+
+Important parameter groups:
+
+- `force_params`
+  - AOI, date range, sensors, project name
+- `force_advanced_params`
+  - process folder, FORCE mount path, thread counts, FORCE noise-screening options
+- `analysis_params`
+  - bare-soil thresholds, minimum consecutive detections, weighted-output toggle
+- `run_flags`
+  - whether to run FORCE and/or the analysis stage
+
+Current defaults keep:
+
+- `min_consecutive = 3`
+- standard output enabled
+- weighted output optional via `write_weighted_output`
+
+## Reproducibility notes
+
+This repository now includes:
+
+- command-line overrides for machine-specific paths
+- resume-aware FORCE tile handling
+- stricter output validation before reusing tiles
+- a git ignore file to avoid committing local caches and IDE files
+
+To reproduce a run on another VM, keep these inputs consistent:
+
+- same FORCE datacube version
+- same AOI
+- same date range
+- same thresholds
+- same FORCE screening parameters
+
+## Testing
+
+Syntax check:
+
+```bash
+PYTHONPYCACHEPREFIX=/tmp python3 -m py_compile baresoil_main.py utils/baresoil_utils.py force/force_baresoil_utils.py
+```
+
+Unit tests, if `pytest` is installed:
+
+```bash
+python3 -m pytest -q tests
+```
 
 ## Authors
 
-* [**Sebastian Valencia**](https://github.com/Azarozo19)
-
-## Version History
-
-* v 1.0 - 2026-03-10
+- [Sebastian Valencia](https://github.com/Azarozo19)
 
 ## License
 
-GPL-3.0 license
-
-## Acknowledgments
-
-Inspiration, code snippets, etc.
-
-* [FORDEAD](https://fordead.gitlab.io/fordead_package/)
-* [FORCE Tutorials](https://force-eo.readthedocs.io/en/latest/howto/udf_py.html)
+GPL-3.0
